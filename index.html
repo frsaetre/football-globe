@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Football Globe → Map Projections</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e1420;color:#e8eef7;font-family:Segoe UI,system-ui,sans-serif;overflow:hidden}
+  #ui{position:fixed;top:16px;left:16px;background:#18202ecc;backdrop-filter:blur(6px);padding:14px 16px;border-radius:10px;width:260px;border:1px solid #2b3750}
+  h1{font-size:15px;margin:0 0 10px}
+  button{background:#26324a;color:#e8eef7;border:1px solid #3a4a6b;border-radius:6px;padding:7px 10px;margin:0 4px 6px 0;cursor:pointer;font-size:13px}
+  button.active{background:#2f6fed;border-color:#5b93ff}
+  label{display:block;font-size:12px;margin:8px 0 3px;color:#a9b6cc}
+  input[type=range]{width:100%}
+  #info{font-size:12px;color:#a9b6cc;margin-top:10px;line-height:1.4}
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>⚽ Football → Map Projections</h1>
+  <button data-p="0" class="active">Globe</button>
+  <button data-p="1">Mercator</button>
+  <button data-p="2">Gleason</button>
+  <button id="flip">Flip poles: pentagon ⇄ hexagon</button>
+  <label>Morph blend (manual)</label>
+  <input id="blend" type="range" min="0" max="1" step="0.001" value="0">
+  <label><input id="grat" type="checkbox" checked> Graticule (15°)</label>
+  <label><input id="spin" type="checkbox" checked> Auto-spin globe</label>
+  <div id="info"></div>
+</div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1420);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0.6, 4.6);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// Truncated icosahedron: 12 pentagon centres (icosahedron vertices) + 20 hexagon centres (face centres)
+const phi = (1+Math.sqrt(5))/2;
+const verts = [];
+for (const a of [-1,1]) for (const b of [-phi,phi]) {
+  verts.push(new THREE.Vector3(0,a,b), new THREE.Vector3(a,b,0), new THREE.Vector3(b,0,a));
+}
+const edge = 2;
+const faces = [];
+for (let i=0;i<12;i++) for (let j=i+1;j<12;j++) for (let k=j+1;k<12;k++) {
+  const d = (x,y)=>verts[x].distanceTo(verts[y]);
+  if (Math.abs(d(i,j)-edge)<1e-3 && Math.abs(d(j,k)-edge)<1e-3 && Math.abs(d(i,k)-edge)<1e-3)
+    faces.push(verts[i].clone().add(verts[j]).add(verts[k]).normalize());
+}
+// Tilt the pattern so black pentagons sit exactly on the north and south poles
+const tilt = new THREE.Quaternion().setFromUnitVectors(verts[0].clone().normalize(), new THREE.Vector3(0,1,0));
+const baseNormals = [...verts.map(v=>v.clone().normalize()), ...faces].map(v=>v.applyQuaternion(tilt));
+const hexAtPole = baseNormals.slice(12).reduce((b,v)=>v.y>b.y?v:b);
+const toHex = new THREE.Quaternion().setFromUnitVectors(hexAtPole, new THREE.Vector3(0,1,0));
+const normals = baseNormals.map(v=>v.clone());
+const qTmp = new THREE.Quaternion(), qId = new THREE.Quaternion();
+function setPoleBlend(s){
+  qTmp.copy(qId).slerp(toHex, s);
+  normals.forEach((n,i)=>n.copy(baseNormals[i]).applyQuaternion(qTmp));
+}
+// Plane distances of the real truncated icosahedron (edge 1): pentagon 2.3274, hexagon 2.2672
+const hs = normals.map((_,i)=> i<12 ? 1.0 : 2.2672/2.3274);
+
+// Lat/lon grid; shader derives sphere & fp positions from uv = (lon, lat)
+const NX = 256, NY = 128;
+const pos = [], uv = [], idx = [];
+for (let y=0;y<=NY;y++) for (let x=0;x<=NX;x++) {
+  const lon = (x/NX*2-1)*Math.PI, lat = (0.5 - y/NY)*Math.PI;
+  uv.push(lon, lat); pos.push(0,0,0);
+}
+for (let y=0;y<NY;y++) for (let x=0;x<NX;x++) {
+  const a = y*(NX+1)+x, b = a+1, c = a+NX+1, d = c+1;
+  idx.push(a,c,b, b,c,d);
+}
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv,2));
+geo.setIndex(idx);
+
+const uniforms = {
+  uFlip:{value:0}, uBlend:{value:0}, uProj:{value:1}, uGrat:{value:1},
+  uN:{value:normals}, uH:{value:hs}
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms, side:THREE.DoubleSide,
+  vertexShader:`
+    uniform float uBlend; uniform int uProj;
+    varying vec3 vDir; varying vec2 vLL; varying float vLight; varying float vClip;
+    const float PI = 3.14159265359;
+    void main(){
+      float lon = uv.x, lat = uv.y;
+      // Orientation: y up (north), lon 0 faces +z
+      vec3 dir = vec3(cos(lat)*sin(lon), sin(lat), cos(lat)*cos(lon));
+      float t = uBlend;
+      vec3 p;
+      if (uProj == 1) {
+        // Mercator: sphere -> cylinder, then unroll the cylinder (curvature 1 -> 0)
+        float l = clamp(lat, -1.4835, 1.4835); // ±85°
+        float ym = log(tan(PI*0.25 + l*0.5));
+        float a = clamp(t/0.35, 0.0, 1.0);
+        float u = clamp((t-0.35)/0.65, 0.0, 1.0);
+        if (u <= 0.0) {
+          float R = mix(cos(lat), 1.0, a);
+          p = vec3(R*sin(lon), mix(sin(lat), ym, a), R*cos(lon));
+        } else {
+          float k = max(1.0-u, 1e-3);
+          p = vec3(sin(k*lon)/k, ym, (cos(k*lon)-1.0)/k + k) * mix(1.0, 0.5, u);
+        }
+      } else {
+        // Gleason: turn the north pole towards the viewer, then flatten the sphere like a peeled cap
+        float a = clamp(t/0.3, 0.0, 1.0);
+        float u = clamp((t-0.3)/0.7, 0.0, 1.0);
+        if (u <= 0.0) {
+          float th = a*PI*0.5;
+          p = vec3(dir.x, dir.y*cos(th)-dir.z*sin(th), dir.y*sin(th)+dir.z*cos(th));
+        } else {
+          float k = max(1.0-u, 1e-3);
+          float c = PI*0.5 - lat;
+          float r = sin(k*c)/k;
+          p = vec3(r*sin(lon), -r*cos(lon), (cos(k*c)-1.0)/k + k) * mix(1.0, 1.7/PI, u);
+        }
+      }
+      vec3 n = normalize(mix(dir, vec3(0.,0.,1.), t));
+      vec3 nw = normalize(mat3(modelMatrix)*n);
+      vLight = 0.55 + 0.45*max(dot(nw, normalize(vec3(0.4,0.6,1.0))), 0.0);
+      vDir = dir; vLL = uv; vClip = (uProj==1 && abs(lat)>1.4835) ? step(0.98, uBlend) : 0.0;
+      gl_Position = projectionMatrix*modelViewMatrix*vec4(p,1.0);
+    }`,
+  fragmentShader:`
+    uniform vec3 uN[32]; uniform float uH[32];     uniform float uGrat; uniform float uFlip;
+    varying vec3 vDir; varying vec2 vLL; varying float vLight; varying float vClip;
+    void main(){
+      if(vClip>0.5) discard;
+      vec3 d = normalize(vDir);
+      float fc = cos(uFlip), fs = sin(uFlip);
+      d = vec3(d.x, d.y*fc - d.z*fs, d.y*fs + d.z*fc);
+      float best=-1e9, second=-1e9; int bi=0;
+      for(int i=0;i<32;i++){
+        float s = dot(d,uN[i])/uH[i];
+        if(s>best){second=best;best=s;bi=i;} else if(s>second){second=s;}
+      }
+      float diff = (best-second);
+      float seam = smoothstep(0.0, 3.0*fwidth(diff)+1e-5, diff);
+      vec3 base = bi<12 ? vec3(0.04) : vec3(0.96);
+      vec3 col = mix(vec3(0.35,0.35,0.38), base, seam);
+      if(uGrat>0.5){
+        vec2 g = vLL/radians(15.0);
+        vec2 f = abs(fract(g-0.5)-0.5)/max(fwidth(g),1e-4);
+        float line = 1.0 - min(min(f.x,f.y),1.0);
+        col = mix(col, vec3(0.1,0.55,1.0), line*0.55);
+      }
+      gl_FragColor = vec4(col*vLight, 1.0);
+    }`
+});
+const mesh = new THREE.Mesh(geo, mat);
+mesh.frustumCulled = false;
+scene.add(mesh);
+
+// State & animation
+let target = 0, proj = 1, blend = 0, spin = 0, camGoal = null;
+const slider = document.getElementById('blend');
+const info = document.getElementById('info');
+const notes = [
+  'Truncated icosahedron: 12 black pentagons, 20 white hexagons, projected onto the sphere.',
+  'Mercator: cylindrical, conformal. Shapes are preserved locally; area explodes towards the poles (clipped at 85°).',
+  "Gleason's: north-polar azimuthal equidistant. Distances from the North Pole are true; the South Pole becomes the outer rim."
+];
+function setProjection(p){
+  document.querySelectorAll('button').forEach(b=>b.classList.toggle('active', +b.dataset.p===p));
+  info.textContent = notes[p];
+  if (p===0) { target = 0; camGoal = new THREE.Vector3(0,0.6,4.6); }
+  else { proj = p; uniforms.uProj.value = p; target = 1; camGoal = new THREE.Vector3(0,0,p===1?5.2:5.0); controls.target.set(0,0,0); }
+  slider.value = blend;
+}
+// Switching between two fp maps: collapse to globe first for a clean morph, then expand
+let queued = null;
+let flipTarget = 0, flipState = 0;
+document.getElementById('flip').onclick = ()=>{ flipTarget = 1 - flipTarget; };
+document.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>{
+  const p = +b.dataset.p;
+  if (p>0 && blend>0.01 && p!==proj) { queued = p; setProjection(0); document.querySelectorAll('button').forEach(x=>x.classList.toggle('active', +x.dataset.p===p)); }
+  else { queued = null; setProjection(p); }
+});
+slider.oninput = ()=>{ blend = target = +slider.value; if(proj===0) proj=1; };
+document.getElementById('grat').onchange = e=>uniforms.uGrat.value = e.target.checked?1:0;
+const spinBox = document.getElementById('spin');
+info.textContent = notes[0];
+
+const clock = new THREE.Clock();
+function ease(a,b,dt,speed){ const d=b-a; return Math.abs(d)<1e-4 ? b : a + Math.sign(d)*Math.min(Math.abs(d), speed*dt); }
+renderer.setAnimationLoop(()=>{
+  const dt = Math.min(clock.getDelta(), 0.05);
+  blend = ease(blend, target, dt, 0.6);
+  if (flipState !== flipTarget) { flipState = ease(flipState, flipTarget, dt, 1.2); setPoleBlend(flipState); }
+  if (queued!==null && blend===0) { const q=queued; queued=null; setProjection(q); }
+  uniforms.uBlend.value = blend*blend*(3-2*blend);
+  if (document.activeElement!==slider) slider.value = blend;
+  if (spinBox.checked) spin += dt*0.35;
+  mesh.rotation.y = spin*(1-uniforms.uBlend.value);
+  if (camGoal) { camera.position.lerp(camGoal, 0.06); if (camera.position.distanceTo(camGoal)<0.01) camGoal=null; }
+  controls.update();
+  renderer.render(scene,camera);
+});
+addEventListener('resize',()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
