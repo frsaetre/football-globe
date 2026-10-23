@@ -201,7 +201,8 @@ renderer.setAnimationLoop(()=>{
   if (queued!==null && blend===0) { const q=queued; queued=null; setProjection(q); }
   uniforms.uBlend.value = blend*blend*(3-2*blend);
   if (document.activeElement!==slider) slider.value = blend;
-  if (spinBox.checked) spin += dt*0.35;
+  if (spinBox.checked && target===0 && blend===0) spin += dt*0.35;
+  spin = ((spin + Math.PI) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI) - Math.PI;
   mesh.rotation.y = spin*(1-uniforms.uBlend.value);
   if (camGoal) { camera.position.lerp(camGoal, 0.06); if (camera.position.distanceTo(camGoal)<0.01) camGoal=null; }
   controls.update();
