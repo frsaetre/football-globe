@@ -117,17 +117,14 @@ const mat = new THREE.ShaderMaterial({
         }
       } else {
         // Gleason: turn the north pole towards the viewer, then flatten the sphere like a peeled cap
-        float a = clamp(t/0.3, 0.0, 1.0);
-        float u = clamp((t-0.3)/0.7, 0.0, 1.0);
-        if (u <= 0.0) {
-          float th = a*PI*0.5;
-          p = vec3(dir.x, dir.y*cos(th)-dir.z*sin(th), dir.y*sin(th)+dir.z*cos(th));
-        } else {
-          float k = max(1.0-u, 1e-3);
-          float c = PI*0.5 - lat;
-          float r = sin(k*c)/k;
-          p = vec3(r*sin(lon), -r*cos(lon), (cos(k*c)-1.0)/k + k) * mix(1.0, 1.7/PI, u);
-        }
+        // Unroll the cap around the pole while tilting it towards the viewer in one smooth motion
+        float u = smoothstep(0.0, 1.0, t);
+        float th = u*PI*0.5;
+        float k = max(1.0-u, 1e-3);
+        float c = PI*0.5 - lat;
+        float r = sin(k*c)/k;
+        vec3 q = vec3(r*sin(lon), (cos(k*c)-1.0)/k + k, r*cos(lon)) * mix(1.0, 1.7/PI, u);
+        p = vec3(q.x, q.y*cos(th)-q.z*sin(th), q.y*sin(th)+q.z*cos(th));
       }
       vec3 n = normalize(mix(dir, vec3(0.,0.,1.), t));
       vec3 nw = normalize(mat3(modelMatrix)*n);
